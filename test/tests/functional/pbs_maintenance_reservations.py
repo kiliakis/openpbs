@@ -715,3 +715,57 @@ class TestMaintenanceReservations(TestFunctional):
 
         regex = "^pbs_rsub: Host with resources not found: .*"
         self.assertTrue(re.search(regex, msg))
+
+    def test_rsub_overlapping_maintenance(self):
+        """
+        Test that when two overlapping maintenance reservations are made,
+        the jobs submitted to both reservations queues should be allowed to run
+        even if they request exclusive access.
+        """
+
+        self.server.manager(MGR_CMD_SET, SERVER,
+                            {'managers': (INCR, '%s@*' % TEST_USER)})
+
+        # Job and reservation duration
+        now = int(time.time())
+        resv_start_time = now + 2
+        resv_duration = 20
+        job_duration = int(resv_duration // 2)
+
+        # Prepare reservation attributes
+        attrs = {'reserve_start': resv_start_time,
+                 'reserve_end': resv_start_time + resv_duration}
+        hosts = [self.mom.shortname]
+
+        # Submit first reservation job
+        r1 = Reservation(TEST_USER, attrs=attrs, hosts=hosts)
+        rid1 = self.server.submit(r1)
+
+        # Reservation should be confirmed
+        exp = {'reserve_state': (MATCH_RE, "RESV_CONFIRMED|2")}
+        self.server.expect(RESV, exp, id=rid1)
+
+        # Submit second reservation job, with the same attributes
+        r2 = Reservation(TEST_USER, attrs=attrs, hosts=hosts)
+        rid2 = self.server.submit(r2)
+
+        # Reservation should be confirmed
+        self.server.expect(RESV, exp, id=rid1)
+        self.server.expect(RESV, exp, id=rid2)
+
+        # submit a job that takes all resources in second queue
+        aj = {'Resource_List.select': '1',
+              'Resource_List.place': 'excl',
+              ATTR_q: rid2.split('.')[0]
+              }
+        j = Job(TEST_USER, attrs=aj)
+        j.set_sleep_time(job_duration)
+        jid = self.server.submit(j)
+
+        # Reservation should be in runing state
+        exp = {'reserve_state': (MATCH_RE, "RESV_RUNNING|5")}
+        expect_offset = resv_start_time - int(time.time())
+        self.server.expect(RESV, exp, id=rid2, offset=expect_offset)
+
+        # job should be in running state
+        self.server.expect(JOB, {'job_state': 'R'}, id=jid)
